@@ -53,6 +53,9 @@ from config import (
     LORA_SAVE_EVERY_N_EPOCHS,
     LORA_OPTIMIZER,
     LORA_TARGET_MODULES,
+    LORA_TRAIN_TEXT_ENCODER,
+    LORA_TEXT_ENCODER_LR,
+    LORA_TEXT_ENCODER_TARGET_MODULES,
     MIXED_PRECISION,
     GRADIENT_CHECKPOINTING,
     USE_XFORMERS,
@@ -114,7 +117,7 @@ def create_lr_scheduler(optimizer, scheduler_name, warmup_steps, total_steps):
     )
 
 
-def convert_peft_to_kohya(peft_state_dict, lora_alpha, lora_rank):
+def _convert_peft_keys(peft_state_dict, lora_alpha, prefix=""):
     """peft形式のLoRA重みをKohya/ComfyUI互換形式に変換する。
 
     変換ルール:
@@ -123,32 +126,30 @@ def convert_peft_to_kohya(peft_state_dict, lora_alpha, lora_rank):
     - .lora_B.weight → .lora_up.weight
     - ドットをアンダースコアに変換（最後の .weight は除く）
     - 各LoRA層に対応するalpha値テンソルを追加
+    - prefixが指定された場合、変換後キーの先頭に付与
     """
     kohya_dict = {}
     processed_keys = set()
 
     for key, value in peft_state_dict.items():
-        # peftのLoRAキーのみ処理
         if "lora_A" not in key and "lora_B" not in key:
             continue
 
-        # base_model.model. プレフィックスを除去
         new_key = key
         if new_key.startswith("base_model.model."):
             new_key = new_key[len("base_model.model."):]
 
-        # lora_A → lora_down, lora_B → lora_up
         new_key = new_key.replace(".lora_A.weight", ".lora_down.weight")
         new_key = new_key.replace(".lora_B.weight", ".lora_up.weight")
 
-        # ドットをアンダースコアに変換（.weightの前まで）
         parts = new_key.rsplit(".weight", 1)
         converted = parts[0].replace(".", "_") + ".weight"
 
-        # lora_sd_ プレフィックスを付与（ComfyUI Load LoRA互換）
+        if prefix:
+            converted = prefix + converted
+
         kohya_dict[converted] = value
 
-        # alpha値を追加（lora_downキーに対応するalphaを一度だけ追加）
         if "lora_down" in converted:
             alpha_key = converted.replace("lora_down.weight", "alpha")
             if alpha_key not in processed_keys:
@@ -158,16 +159,28 @@ def convert_peft_to_kohya(peft_state_dict, lora_alpha, lora_rank):
     return kohya_dict
 
 
-def save_lora_checkpoint(unet, optimizer, lr_scheduler, epoch, global_step, output_path: Path):
+def convert_peft_to_kohya(unet_state_dict, te_state_dict, lora_alpha):
+    """UNetとText EncoderのLoRA重みをKohya/ComfyUI互換形式に統合する。"""
+    kohya_dict = {}
+    kohya_dict.update(_convert_peft_keys(unet_state_dict, lora_alpha, prefix=""))
+    if te_state_dict:
+        kohya_dict.update(_convert_peft_keys(te_state_dict, lora_alpha, prefix="lora_te_"))
+    return kohya_dict
+
+
+def save_lora_checkpoint(unet, text_encoder, optimizer, lr_scheduler, epoch, global_step, output_path: Path):
     """LoRAチェックポイントを保存する。"""
     output_path.mkdir(parents=True, exist_ok=True)
 
     # peft形式で保存（再開用）
-    unet.save_pretrained(str(output_path / "peft_model"))
+    unet.save_pretrained(str(output_path / "peft_unet"))
+    if LORA_TRAIN_TEXT_ENCODER and hasattr(text_encoder, "save_pretrained") and hasattr(text_encoder, "peft_config"):
+        text_encoder.save_pretrained(str(output_path / "peft_te"))
 
     # Kohya/ComfyUI互換形式で保存
-    peft_state_dict = unet.state_dict()
-    kohya_dict = convert_peft_to_kohya(peft_state_dict, LORA_ALPHA, LORA_RANK)
+    unet_state = unet.state_dict()
+    te_state = text_encoder.state_dict() if LORA_TRAIN_TEXT_ENCODER and hasattr(text_encoder, "peft_config") else None
+    kohya_dict = convert_peft_to_kohya(unet_state, te_state, LORA_ALPHA)
     save_file(kohya_dict, str(output_path / "lora.safetensors"))
 
     # Optimizer + Scheduler + 学習状態を保存
@@ -300,30 +313,63 @@ def main():
     text_encoder.requires_grad_(False)
     vae.requires_grad_(False)
 
-    # LoRA適用
-    lora_config = LoraConfig(
+    # UNet LoRA適用
+    unet_lora_config = LoraConfig(
         r=LORA_RANK,
         lora_alpha=LORA_ALPHA,
         target_modules=LORA_TARGET_MODULES,
         lora_dropout=0.0,
     )
-    unet = get_peft_model(unet, lora_config)
+    unet = get_peft_model(unet, unet_lora_config)
+
+    # Text Encoder LoRA適用
+    if LORA_TRAIN_TEXT_ENCODER:
+        te_lora_config = LoraConfig(
+            r=LORA_RANK,
+            lora_alpha=LORA_ALPHA,
+            target_modules=LORA_TEXT_ENCODER_TARGET_MODULES,
+            lora_dropout=0.0,
+        )
+        text_encoder = get_peft_model(text_encoder, te_lora_config)
+        print("Text Encoder LoRA有効化")
 
     # 再開時はpeft重みを復元
-    if resume_path and (resume_path / "peft_model").exists():
+    if resume_path:
         from peft import set_peft_model_state_dict
         import safetensors.torch
-        peft_path = resume_path / "peft_model"
-        adapter_path = peft_path / "adapter_model.safetensors"
-        if adapter_path.exists():
-            adapter_weights = safetensors.torch.load_file(str(adapter_path))
-            set_peft_model_state_dict(unet, adapter_weights)
-            print(f"LoRA重みを復元: {peft_path}")
+        # UNet
+        peft_unet_path = resume_path / "peft_unet"
+        if peft_unet_path.exists():
+            adapter_path = peft_unet_path / "adapter_model.safetensors"
+            if adapter_path.exists():
+                adapter_weights = safetensors.torch.load_file(str(adapter_path))
+                set_peft_model_state_dict(unet, adapter_weights)
+                print(f"UNet LoRA重みを復元: {peft_unet_path}")
+        # 旧形式との互換性
+        elif (resume_path / "peft_model").exists():
+            adapter_path = resume_path / "peft_model" / "adapter_model.safetensors"
+            if adapter_path.exists():
+                adapter_weights = safetensors.torch.load_file(str(adapter_path))
+                set_peft_model_state_dict(unet, adapter_weights)
+                print(f"UNet LoRA重みを復元: {resume_path / 'peft_model'}")
+        # Text Encoder
+        if LORA_TRAIN_TEXT_ENCODER:
+            peft_te_path = resume_path / "peft_te"
+            if peft_te_path.exists():
+                adapter_path = peft_te_path / "adapter_model.safetensors"
+                if adapter_path.exists():
+                    adapter_weights = safetensors.torch.load_file(str(adapter_path))
+                    set_peft_model_state_dict(text_encoder, adapter_weights)
+                    print(f"Text Encoder LoRA重みを復元: {peft_te_path}")
 
     # 学習可能パラメータ数を表示
-    trainable = sum(p.numel() for p in unet.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in unet.parameters())
-    print(f"LoRAパラメータ: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
+    unet_trainable = sum(p.numel() for p in unet.parameters() if p.requires_grad)
+    unet_total = sum(p.numel() for p in unet.parameters())
+    print(f"UNet LoRA: {unet_trainable:,} / {unet_total:,} ({100 * unet_trainable / unet_total:.2f}%)")
+    if LORA_TRAIN_TEXT_ENCODER:
+        te_trainable = sum(p.numel() for p in text_encoder.parameters() if p.requires_grad)
+        te_total = sum(p.numel() for p in text_encoder.parameters())
+        print(f"Text Encoder LoRA: {te_trainable:,} / {te_total:,} ({100 * te_trainable / te_total:.2f}%)")
 
     # Gradient checkpointing
     if GRADIENT_CHECKPOINTING:
@@ -339,7 +385,8 @@ def main():
 
     # fp16に変換（凍結モデル）
     vae.to(dtype=torch.float16)
-    text_encoder.to(dtype=torch.float16)
+    if not LORA_TRAIN_TEXT_ENCODER:
+        text_encoder.to(dtype=torch.float16)
 
     # === データセット ===
     print("データセットを読み込み中...")
@@ -372,9 +419,15 @@ def main():
     )
 
     # === Optimizer & Scheduler ===
-    lora_params = [p for p in unet.parameters() if p.requires_grad]
+    optimizer_params = [
+        {"params": [p for p in unet.parameters() if p.requires_grad], "lr": LORA_LEARNING_RATE},
+    ]
+    if LORA_TRAIN_TEXT_ENCODER:
+        optimizer_params.append(
+            {"params": [p for p in text_encoder.parameters() if p.requires_grad], "lr": LORA_TEXT_ENCODER_LR},
+        )
     optimizer = create_optimizer(
-        lora_params, LORA_OPTIMIZER, LORA_LEARNING_RATE,
+        optimizer_params, LORA_OPTIMIZER, LORA_LEARNING_RATE,
         (ADAM_BETA1, ADAM_BETA2), ADAM_WEIGHT_DECAY,
     )
 
@@ -384,9 +437,15 @@ def main():
     )
 
     # === Accelerate準備 ===
-    unet, optimizer, dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, dataloader, lr_scheduler
-    )
+    if LORA_TRAIN_TEXT_ENCODER:
+        unet, text_encoder, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+            unet, text_encoder, optimizer, dataloader, lr_scheduler
+        )
+    else:
+        unet, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+            unet, optimizer, dataloader, lr_scheduler
+        )
+        text_encoder.to(accelerator.device)
 
     # Optimizer/Scheduler状態復元
     if resume_path:
@@ -399,7 +458,6 @@ def main():
             print("LR Scheduler状態を復元中...")
             lr_scheduler.load_state_dict(torch.load(str(sched_path), map_location="cpu", weights_only=True))
 
-    text_encoder.to(accelerator.device)
     vae.to(accelerator.device)
 
     # === TensorBoard ===
@@ -417,6 +475,7 @@ def main():
     print(f"  総ステップ: {total_steps}")
     print(f"  学習率: {LORA_LEARNING_RATE}")
     print(f"  LoRA rank: {LORA_RANK}, alpha: {LORA_ALPHA}")
+    print(f"  Text Encoder LoRA: {'有効 (lr={})'.format(LORA_TEXT_ENCODER_LR) if LORA_TRAIN_TEXT_ENCODER else '無効'}")
     print(f"  Optimizer: {LORA_OPTIMIZER}")
     if start_epoch > 0:
         print(f"  再開: epoch {start_epoch + 1}から (step {start_global_step})")
@@ -426,6 +485,8 @@ def main():
 
     for epoch in range(start_epoch, LORA_MAX_TRAIN_EPOCHS):
         unet.train()
+        if LORA_TRAIN_TEXT_ENCODER:
+            text_encoder.train()
         epoch_loss = 0.0
         num_batches = 0
 
@@ -436,8 +497,11 @@ def main():
                 latents = batch["latent"].to(dtype=torch.float16)
                 input_ids = batch["input_ids"]
 
-                with torch.no_grad():
+                if LORA_TRAIN_TEXT_ENCODER:
                     encoder_hidden_states = text_encoder(input_ids)[0]
+                else:
+                    with torch.no_grad():
+                        encoder_hidden_states = text_encoder(input_ids)[0]
 
                 noise = torch.randn_like(latents)
                 timesteps = torch.randint(
@@ -458,7 +522,10 @@ def main():
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(unet.parameters(), MAX_GRAD_NORM)
+                    all_params = list(unet.parameters())
+                    if LORA_TRAIN_TEXT_ENCODER:
+                        all_params += list(text_encoder.parameters())
+                    accelerator.clip_grad_norm_(all_params, MAX_GRAD_NORM)
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -484,8 +551,9 @@ def main():
         if (epoch + 1) % LORA_SAVE_EVERY_N_EPOCHS == 0 or (epoch + 1) == LORA_MAX_TRAIN_EPOCHS:
             ckpt_dir = PROJECT_ROOT / LORA_CHECKPOINT_DIR / f"epoch_{epoch + 1:04d}"
             unwrapped_unet = accelerator.unwrap_model(unet)
+            unwrapped_te = accelerator.unwrap_model(text_encoder) if LORA_TRAIN_TEXT_ENCODER else text_encoder
             save_lora_checkpoint(
-                unwrapped_unet, optimizer, lr_scheduler,
+                unwrapped_unet, unwrapped_te, optimizer, lr_scheduler,
                 epoch + 1, global_step, ckpt_dir,
             )
 

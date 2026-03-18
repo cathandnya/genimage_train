@@ -92,6 +92,9 @@ LORA_GRADIENT_ACCUMULATION_STEPS = 2  # 実効バッチサイズ = 2 × 2 = 4
 LORA_SAVE_EVERY_N_EPOCHS = 2
 LORA_OPTIMIZER = "adamw_8bit"
 LORA_TARGET_MODULES = ["to_q", "to_k", "to_v", "to_out.0"]  # UNet Attention層
+LORA_TRAIN_TEXT_ENCODER = True  # Text EncoderにもLoRAを適用（プロンプト追従性向上）
+LORA_TEXT_ENCODER_LR = 5e-5  # Text Encoder用学習率（UNetより低め推奨）
+LORA_TEXT_ENCODER_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "out_proj"]  # CLIP Attention層
 
 # LoRA用チェックポイント・サンプル出力先
 LORA_CHECKPOINT_DIR = "outputs/lora_checkpoints"
