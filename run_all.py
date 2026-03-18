@@ -23,7 +23,7 @@ STEPS = [
         "num": 1,
         "name": "データ前処理",
         "script": "scripts/01_prepare_images.py",
-        "description": "画像リサイズ + バケッティング + 空キャプション生成",
+        "description": "画像リサイズ + バケッティング + キャプション生成",
         "check": lambda: any((PROJECT_ROOT / "data" / "processed").glob("*.png")),
     },
     {

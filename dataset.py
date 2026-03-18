@@ -1,6 +1,6 @@
 """学習用Datasetクラス。
 
-キャッシュ済みlatent + 空キャプション + 正則化画像インターリーブ + バケットサンプラー対応。
+キャッシュ済みlatent + キャプション + 正則化画像インターリーブ + バケットサンプラー対応。
 """
 
 import random
@@ -14,7 +14,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 class LatentDataset(Dataset):
-    """キャッシュ済みlatentと空キャプションを読み込むDataset。"""
+    """キャッシュ済みlatentとキャプションを読み込むDataset。"""
 
     def __init__(
         self,
