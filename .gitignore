@@ -1,0 +1,42 @@
+# モデル（大きいファイル）
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+
+# データ
+data/raw/
+data/processed/
+data/reg/
+
+# 出力
+outputs/
+
+# ダウンロードした変換スクリプト
+scripts/_convert_diffusers_to_original.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 環境
+.env
+*.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
