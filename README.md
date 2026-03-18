@@ -171,7 +171,21 @@ python run_all.py --skip 2 5
 
 ## パラメータ調整
 
-`config.py`で全パラメータを管理しています。
+`config.py`にデフォルト値が定義されています。変更したい場合は`config_local.py`を作成して上書きしてください。`config_local.py`はgit管理外なので`git pull`で上書きされません。
+
+```bash
+# サンプルをコピーして編集
+cp config_local.example.py config_local.py
+```
+
+`config_local.py`には変更したい値だけ記述すればOKです:
+
+```python
+# config_local.py の例
+COMMON_CAPTION = "nystyle"
+LORA_RANK = 256
+LORA_TRAIN_BATCH_SIZE = 4
+```
 
 ### Full Fine-Tune パラメータ
 

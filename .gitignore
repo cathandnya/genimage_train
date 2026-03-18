@@ -16,6 +16,9 @@ outputs/
 # ダウンロードした変換スクリプト
 scripts/_convert_diffusers_to_original.py
 
+# ユーザーローカル設定
+config_local.py
+
 # Python
 __pycache__/
 *.pyc

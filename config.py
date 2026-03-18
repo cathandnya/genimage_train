@@ -104,3 +104,11 @@ LORA_LOG_DIR = "outputs/lora_logs"
 # === データローダー ===
 DATALOADER_NUM_WORKERS = 0  # Windows環境では0推奨
 REG_RATIO = 1.0  # 正則化画像の比率（1.0 = 学習画像と同数）
+
+# === ユーザーローカル設定の読み込み ===
+# config_local.py が存在する場合、上記の値を上書きする
+# config_local.py は .gitignore に含まれるため、各環境固有の設定を安全に保持できる
+try:
+    from config_local import *  # noqa: F401, F403
+except ImportError:
+    pass
