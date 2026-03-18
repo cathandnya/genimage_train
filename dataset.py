@@ -107,19 +107,25 @@ class BucketSampler(Sampler):
 
     def __iter__(self):
         # バケットごとにbatch_size単位のグループを作成
-        # 端数はバッチ境界をまたがないよう最後のグループに含める
+        # 端数（batch_sizeに満たない余り）は捨てて、異なる解像度の混在を防ぐ
         bucket_groups = []
+        dropped = 0
         for indices in self.buckets.values():
+            idx_copy = indices[:]
             if self.shuffle:
-                random.shuffle(indices)
-            for i in range(0, len(indices), self.batch_size):
-                bucket_groups.append(indices[i : i + self.batch_size])
+                random.shuffle(idx_copy)
+            # batch_sizeの倍数に切り捨て
+            usable = len(idx_copy) - (len(idx_copy) % self.batch_size)
+            dropped += len(idx_copy) - usable
+            for i in range(0, usable, self.batch_size):
+                bucket_groups.append(idx_copy[i : i + self.batch_size])
 
         if self.shuffle:
             random.shuffle(bucket_groups)
 
         all_indices = [idx for group in bucket_groups for idx in group]
+        self._effective_len = len(all_indices)
         return iter(all_indices)
 
     def __len__(self):
-        return len(self.dataset)
+        return getattr(self, "_effective_len", len(self.dataset))
