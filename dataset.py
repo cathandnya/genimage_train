@@ -106,21 +106,19 @@ class BucketSampler(Sampler):
             self.buckets[key].append(idx)
 
     def __iter__(self):
-        all_indices = []
-        for bucket_key, indices in self.buckets.items():
+        # バケットごとにbatch_size単位のグループを作成
+        # 端数はバッチ境界をまたがないよう最後のグループに含める
+        bucket_groups = []
+        for indices in self.buckets.values():
             if self.shuffle:
                 random.shuffle(indices)
-            all_indices.extend(indices)
+            for i in range(0, len(indices), self.batch_size):
+                bucket_groups.append(indices[i : i + self.batch_size])
 
         if self.shuffle:
-            # バケット間の順序もシャッフル（ただしバケット内はまとまる）
-            bucket_groups = []
-            for indices in self.buckets.values():
-                for i in range(0, len(indices), self.batch_size):
-                    bucket_groups.append(indices[i : i + self.batch_size])
             random.shuffle(bucket_groups)
-            all_indices = [idx for group in bucket_groups for idx in group]
 
+        all_indices = [idx for group in bucket_groups for idx in group]
         return iter(all_indices)
 
     def __len__(self):

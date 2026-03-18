@@ -368,6 +368,7 @@ def main():
         sampler=sampler,
         num_workers=DATALOADER_NUM_WORKERS,
         pin_memory=True,
+        drop_last=True,
     )
 
     # === Optimizer & Scheduler ===
